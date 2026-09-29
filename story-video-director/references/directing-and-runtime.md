@@ -83,6 +83,12 @@ Choose one dominant grammar per clip:
 
 Maintain screen direction across adjacent clips unless a deliberate axis break communicates disorientation.
 
+For multiple subjects or complex action, define a location map and first-frame blocking before writing camera moves. State fixed landmarks, entrances, exits, facing direction, and which object remains after each impact. Choose either a single continuous take or a controlled multi-shot sequence; do not leave the cut policy ambiguous.
+
+Write physical camera instructions: height, distance, path, speed, rig behavior, and dramatic purpose. `Dynamic handheld` alone is insufficient for a complex shot. Lock focal length inside a timed segment when spatial stability matters and change it only at an explicit cut.
+
+Write impacts as a chain: preparation → contact → material response → recoil/follow-through → environmental consequence → recovery. If unusual gravity or orientation repeatedly fails, change or rotate the controlling input image before expanding the prose prompt.
+
 ## 6. Spoken-time discipline
 
 Do not duplicate the same information in dialogue and narration. Alternate their jobs:
@@ -92,4 +98,3 @@ Do not duplicate the same information in dialogue and narration. Alternate their
 - silence supplies suspense, grief, wonder, and comic timing.
 
 If dialogue plus narration exceeds the clip, remove one, shorten it, or split the clip. Never solve this by forcing unnaturally fast speech.
-

@@ -32,13 +32,15 @@ Identify:
 - spoken content, action complexity, and scene changes;
 - supplied reference files and their intended roles.
 
+For acted narrative, read [references/performance-to-prompt.md](references/performance-to-prompt.md) and [references/dialogue-and-screenplay-continuity.md](references/dialogue-and-screenplay-continuity.md) before assigning clip boundaries. Write a scene card and beat sheet first: each named actor needs a present objective, an obstacle, a playable tactic, a trigger for the next response, and a changed end state. For grief or comedy, preserve the listener's reaction and the time it takes; emotional adjectives alone are not a performance plan.
+
 For detailed directing heuristics, read [references/directing-and-runtime.md](references/directing-and-runtime.md).
 
 ### 2. Determine runtime before writing prompts
 
 Calculate the best total runtime from information density, dialogue time, action readability, emotional holds, and transitions. Do not force every story into 15 seconds.
 
-Split the project into independently generated clips. Enforce:
+Write the causal scene sequence first, then split it into generation units. A generation boundary is not automatically a scene ending. Enforce:
 
 - every clip is 15 seconds or shorter;
 - one principal event per clip;
@@ -46,7 +48,17 @@ Split the project into independently generated clips. Enforce:
 - an explicit opening state and final state;
 - dialogue and narration that fit naturally within the clip.
 
-Report total runtime and `mm:ss` form.
+For each scene, keep a complete screenplay and performance sheet as the source for the shorter clips. Record who is physically present, what each knows, exact speech, who listens, body and prop actions, timing, coverage and the state passed to the next clip. In a three-clip run, inspect setup → changed tactic → consequence as one dramatic unit; the middle clip must inherit and advance the action.
+
+Report total runtime and `mm:ss` form. Distinguish generated duration from edited runtime when trimming or overlapping footage.
+
+### 2a. Design every boundary before generating assets
+
+For any multi-clip project, read [references/continuity-and-edit-design.md](references/continuity-and-edit-design.md). Create `02-continuity-plan.md` with one handoff per adjacent clip pair. Decide why the audience should see the next shot, what action or question carries across, what state must persist, and which visual/audio edit achieves it.
+
+Choose actual-frame continuation only for compatible continuous action and camera geometry. Use motivated coverage, reaction, detail inserts, sound bridges, or an explicit time/location transition when those serve the story better. Do not force all clips into a simulated long take. Copy each handoff's relevant opening and outgoing instructions into the two consuming prompts.
+
+Resolve narrative contradictions before polishing frames; an identical boundary image cannot repair a missing cause, repeated action, or unexplained time jump.
 
 ### 3. Create the director treatment
 
@@ -118,8 +130,10 @@ Inside each prompt, include:
 4. timestamped beats with visible action, camera motion, screen direction, and sound;
 5. dialogue language and delivery when dialogue exists;
 6. ambience, effects, music policy, and subtitle policy;
-7. explicit final frame;
+7. explicit final state, including motion phase and the outgoing handoff;
 8. negative prompt.
+
+For every spoken line, choose the production path before prompting: controlled one-speaker generated sync, a verified post-recorded/lip-sync pass, or sound-led coverage over a relevant non-speaking image. Record the choice in the dialogue ledger/performance sheet. A prompt instruction to synchronize lips is not evidence that the rendered mouth matches the words. When a close speaking face is essential, give the line its own readable time range and inspect the result before locking adjacent dialogue shots.
 
 Use `{dialogue}`, `<sound effect>`, `(music)`, and `【subtitle】` when clarity benefits. Default to no generated subtitles and no on-screen title; add typography in post.
 
@@ -141,6 +155,7 @@ project-name/
 │   └── ...
 ├── 00-director-brief.md
 ├── 01-production-timeline.md
+├── 02-continuity-plan.md  # required for multiple clips
 ├── project-manifest.json
 └── api-jobs.json
 ```
@@ -156,8 +171,8 @@ When the user explicitly asks for finished video generation, prefer the Metaso M
 Before submitting any paid job:
 
 1. finish and validate all assets, prompts, `project-manifest.json`, and `api-jobs.json`;
-2. create one standalone first-frame image per clip that already combines the required character identity, location, lighting, costume, and opening composition;
-3. ensure every `api-jobs.json` job identifies exactly one image reference with `"role": "first_frame"`;
+2. select a supported input mode per job using the provider reference; for image-to-video create a standalone opening frame combining identity, location, lighting, costume, and composition;
+3. keep frame conditioning and multimodal reference modes separate; ensure actual uploaded roles match the selected mode and the boundary plan;
 4. tell the user that external generation consumes provider credits and ask them to configure `METASO_API_KEY` locally if it is absent;
 5. never request that the user paste a key into project files, never write the key to disk, and never include it in logs, manifests, commands shown in the final response, or Git history;
 6. submit, poll, download, normalize, concatenate, and verify with `scripts/metaso_h3_video.py`.
@@ -166,7 +181,7 @@ If `METASO_API_KEY` is missing, direct the user to [metaso.cn/minimax-h3](https:
 
 If the user wants another video provider, ask them to paste or link its relevant API documentation rather than guessing the integration. Request the submission endpoint and method, authentication format, request body, image upload or URL rules, duration and resolution limits, asynchronous task query endpoint, success/failure response examples, and result download field. Tell them to redact live credentials from documentation samples. Adapt the provider only after these details are known; keep the same paid-action gate and secret-handling rules.
 
-For multiple clips, preserve narrative order and use the previous clip's planned final composition as the next clip's first-frame design when continuity matters. Each submitted clip remains 15 seconds or shorter. Read [references/metaso-minimax-h3.md](references/metaso-minimax-h3.md) before preparing or executing jobs.
+For multiple clips, follow the chosen boundary strategy. A planned end frame is a design target, not evidence of the rendered ending. For actual-frame continuation, inspect the upstream rendered boundary before committing dependent paid work; follow the staged execution and renderer limitations in the continuity guide. Each submitted clip remains 15 seconds or shorter. Read [references/metaso-minimax-h3.md](references/metaso-minimax-h3.md) before preparing or executing jobs.
 
 ### 10. Validate before delivery
 
@@ -185,7 +200,9 @@ Also visually inspect at least:
 - the first, most complex, and final shot image;
 - any image that controls a dangerous, magical, or anatomy-sensitive action.
 
-If video rendering was requested, additionally inspect the first frame, every clip boundary, the most complex action, the final frame, audio continuity, exact output duration, resolution, frame rate, and codec metadata.
+For multi-clip work, review every handoff in `02-continuity-plan.md`; structural validation alone cannot establish natural continuity. If video rendering was requested, watch each boundary with 1–2 seconds of moving footage on both sides at normal speed with sound, then inspect frames as needed. Additionally inspect the first frame, every clip boundary, the most complex action, the final frame, audio continuity, exact output duration, resolution, frame rate, and codec metadata.
+
+For acted scenes, review the whole scene without reading prompts, then audit the trigger, performer action, listener reaction, emotional carryover, and comic or tragic timing. Audit each utterance against the dialogue ledger for exact words, correct voice/face, visible mouth timing, listener mouth state and cut position. If lip sync or identity fails, classify and repair the affected clip or edit; do not certify it from prompt text.
 
 ### 11. Deliver for humans and APIs
 
@@ -210,9 +227,12 @@ Do not make the user reconstruct references or combine separate sound and pictur
 - Never treat a storyboard sheet as finished-film visual style.
 - Never allow a multi-panel character sheet background or grid to become the scene.
 - Never use a recurring-character sheet without explicitly excluding its studio background, multi-view layout, panel seams, and neutral reference pose in every consuming video prompt.
-- Never omit an explicit final frame.
+- Never omit an explicit final frame; describe continuing velocity when appropriate instead of forcing a pose or stop.
+- Never use identical end/start frames as proof of narrative, motion, or audio continuity.
+- Never claim automatic concatenation implements planned J/L cuts, overlap trims, or a master audio mix.
 - Never invent on-screen text unless the user requested it.
 - Never claim an image or video was generated unless the artifact exists.
+- Never describe acting, identity continuity, or lip sync as verified solely from a screenplay, reference image, prompt, or still frame.
 - Never submit a paid video job without an explicit user request to generate video.
 - Never store or print `METASO_API_KEY`, bearer tokens, or provider credentials.
 - Never ask for a full authenticated curl command when only the token or redacted API documentation is needed.
@@ -220,6 +240,10 @@ Do not make the user reconstruct references or combine separate sound and pictur
 - Never silently replace a failed provider-generated clip with an edited, duplicated, or still-image-derived segment; disclose and obtain user agreement for a fallback.
 
 ## Resource map
+
+- [references/continuity-and-edit-design.md](references/continuity-and-edit-design.md): mandatory multi-clip boundary planning, motivated cuts, actual-frame handoffs, audio bridges, staged rendering, and moving-boundary QA.
+- [references/performance-to-prompt.md](references/performance-to-prompt.md): scene cards, playable actor tasks, grief/comedy timing, three-clip runs, dialogue production paths, and rendered performance QA.
+- [references/dialogue-and-screenplay-continuity.md](references/dialogue-and-screenplay-continuity.md): exact dialogue ledger, speaker ownership, and speech QA.
 
 - [references/directing-and-runtime.md](references/directing-and-runtime.md): runtime math, dramatic beats, clip splitting, camera choices.
 - [references/seedance-reference-rules.md](references/seedance-reference-rules.md): 2.0/2.5 budgets, upload order, reference roles, exclusions.

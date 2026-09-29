@@ -52,18 +52,73 @@ def fenced_prompt(path: Path) -> str:
     return blocks[0].strip()
 
 
-def first_frame(job: dict, root: Path) -> Path:
+MEDIA_TYPES = {"image": "image_url", "video": "video_url", "audio": "audio_url"}
+ALLOWED_ROLES = {
+    "image": {"first_frame", "last_frame", "reference_image"},
+    "video": {"reference_video"},
+    "audio": {"reference_audio"},
+}
+
+
+def job_references(job: dict, root: Path) -> list[tuple[dict, Path]]:
     refs = job.get("references", [])
-    matches = [
-        ref for ref in refs
-        if isinstance(ref, dict) and ref.get("type") == "image" and ref.get("role") == "first_frame"
-    ] if isinstance(refs, list) else []
-    if len(matches) != 1:
-        raise SystemExit(f"{job.get('id', 'job')}: expected exactly one first_frame image")
-    path = root / str(matches[0].get("path", ""))
-    if not path.is_file():
-        raise SystemExit(f"{job.get('id', 'job')}: first frame does not exist: {path}")
-    return path
+    if not isinstance(refs, list) or not refs:
+        raise SystemExit(f"{job.get('id', 'job')}: expected at least one media reference")
+    prepared: list[tuple[dict, Path]] = []
+    seen_slots: set[int] = set()
+    for ref in refs:
+        if not isinstance(ref, dict):
+            raise SystemExit(f"{job.get('id', 'job')}: every reference must be an object")
+        media_type = str(ref.get("type", ""))
+        role = str(ref.get("role", ""))
+        slot = ref.get("slot")
+        if media_type not in MEDIA_TYPES or role not in ALLOWED_ROLES[media_type]:
+            raise SystemExit(f"{job.get('id', 'job')}: invalid reference type/role {media_type}/{role}")
+        if not isinstance(slot, int) or isinstance(slot, bool) or slot <= 0 or slot in seen_slots:
+            raise SystemExit(f"{job.get('id', 'job')}: reference slots must be unique positive integers")
+        seen_slots.add(slot)
+        path = root / str(ref.get("path", ""))
+        if not path.is_file():
+            raise SystemExit(f"{job.get('id', 'job')}: reference does not exist: {path}")
+        prepared.append((ref, path))
+    prepared.sort(key=lambda item: int(item[0]["slot"]))
+    slots = [int(item[0]["slot"]) for item in prepared]
+    if slots != list(range(1, len(slots) + 1)):
+        raise SystemExit(f"{job.get('id', 'job')}: reference slots must be contiguous from 1")
+    roles = {str(ref["role"]) for ref, _ in prepared}
+    frame_mode = bool(roles & {"first_frame", "last_frame"})
+    reference_mode = bool(roles & {"reference_image", "reference_video", "reference_audio"})
+    if frame_mode and reference_mode:
+        raise SystemExit(f"{job.get('id', 'job')}: frame roles and reference roles are mutually exclusive")
+    if frame_mode:
+        if sum(role == "first_frame" for role in roles) > 1 or sum(role == "last_frame" for role in roles) > 1:
+            raise SystemExit(f"{job.get('id', 'job')}: at most one first_frame and one last_frame")
+    else:
+        counts = {role: sum(str(ref["role"]) == role for ref, _ in prepared) for role in roles}
+        if counts.get("reference_image", 0) > 9:
+            raise SystemExit(f"{job.get('id', 'job')}: reference_image limit is 9")
+        if counts.get("reference_video", 0) > 3 or counts.get("reference_audio", 0) > 3:
+            raise SystemExit(f"{job.get('id', 'job')}: reference video/audio limit is 3 each")
+    return prepared
+
+
+def media_data_url(path: Path, media_type: str) -> str:
+    suffix = path.suffix.lower()
+    mime_by_suffix = {
+        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+        ".mp4": "video/mp4", ".mov": "video/quicktime", ".mp3": "audio/mpeg", ".wav": "audio/wav",
+    }
+    mime = mime_by_suffix.get(suffix)
+    if not mime:
+        raise SystemExit(f"Unsupported local media extension: {path}")
+    return f"data:{mime};base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+
+
+def public_media_url(ref: dict, path: Path, media_type: str) -> str:
+    url = ref.get("url")
+    if isinstance(url, str) and url.startswith(("https://", "http://")):
+        return url
+    return media_data_url(path, media_type)
 
 
 def request_json(url: str, token: str, payload: dict | None = None) -> dict:
@@ -86,16 +141,16 @@ def request_json(url: str, token: str, payload: dict | None = None) -> dict:
 
 
 def submit(job: dict, root: Path, token: str) -> str:
-    image_path = first_frame(job, root)
     prompt = fenced_prompt(root / str(job["prompt_file"]))
-    mime = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
-    data_url = f"data:{mime};base64," + base64.b64encode(image_path.read_bytes()).decode("ascii")
+    prepared = job_references(job, root)
+    content = [{"type": "text", "text": prompt}]
+    for ref, path in prepared:
+        media_type = str(ref["type"])
+        url_type = MEDIA_TYPES[media_type]
+        content.append({"type": url_type, url_type: {"url": public_media_url(ref, path, media_type)}, "role": str(ref["role"])})
     payload = {
         "model": str(job.get("model", "MiniMax-H3")),
-        "content": [
-            {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": data_url}, "role": "first_frame"},
-        ],
+        "content": content,
         "resolution": str(job.get("resolution", "2K")),
         "duration": int(job.get("duration_seconds", 5)),
         "ratio": str(job.get("aspect_ratio", "adaptive")),
@@ -134,6 +189,17 @@ def probe_dimensions(path: Path) -> tuple[int, int]:
     )
     stream = json.loads(result.stdout)["streams"][0]
     return int(stream["width"]), int(stream["height"])
+
+
+def extract_last_frame(source: Path, target: Path) -> None:
+    """Replace a planned boundary image with the real preceding clip end frame."""
+    if not shutil.which("ffmpeg"):
+        raise SystemExit("ffmpeg is required for chain_from_previous jobs")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    run([
+        "ffmpeg", "-y", "-sseof", "-0.08", "-i", str(source),
+        "-frames:v", "1", "-update", "1", str(target),
+    ])
 
 
 def has_audio(path: Path) -> bool:
@@ -220,13 +286,13 @@ def main() -> int:
     for job in jobs:
         if not isinstance(job, dict):
             raise SystemExit("Every job must be an object")
-        frame = first_frame(job, root)
+        prepared = job_references(job, root)
         fenced_prompt(root / str(job.get("prompt_file", "")))
         duration_value = job.get("duration_seconds", 0)
-        if not isinstance(duration_value, int) or isinstance(duration_value, bool) or duration_value <= 0 or duration_value > 15:
-            raise SystemExit(f"{job.get('id')}: MiniMax-H3 duration_seconds must be an integer in [1, 15]")
+        if not isinstance(duration_value, int) or isinstance(duration_value, bool) or duration_value < 4 or duration_value > 15:
+            raise SystemExit(f"{job.get('id')}: MiniMax-H3 duration_seconds must be an integer in [4, 15]")
         duration = float(duration_value)
-        plan.append({"id": job.get("id"), "duration": duration, "resolution": job.get("resolution", "2K"), "first_frame": str(frame.relative_to(root))})
+        plan.append({"id": job.get("id"), "duration": duration, "resolution": job.get("resolution", "2K"), "references": [{"path": str(path.relative_to(root)), "role": ref["role"], "slot": ref["slot"]} for ref, path in prepared]})
 
     if args.dry_run:
         print(json.dumps({"project": str(root), "jobs": plan, "will_assemble": not args.no_assemble}, ensure_ascii=False, indent=2))
@@ -245,6 +311,22 @@ def main() -> int:
     try:
         for job in jobs:
             job_id = str(job["id"])
+            if job.get("chain_from_previous"):
+                if not clip_paths:
+                    raise RuntimeError(f"{job_id}: chain_from_previous requires a successful preceding clip")
+                refs = job.get("references", [])
+                boundary_refs = [
+                    ref for ref in refs
+                    if isinstance(ref, dict) and ref.get("chain_boundary") is True
+                    and ref.get("role") in {"first_frame", "reference_image"}
+                ]
+                if len(boundary_refs) != 1:
+                    raise RuntimeError(
+                        f"{job_id}: chain_from_previous requires exactly one first_frame or reference_image with chain_boundary=true"
+                    )
+                boundary_path = root / str(boundary_refs[0].get("path", ""))
+                print(f"Preparing continuity frame for {job_id}...", flush=True)
+                extract_last_frame(clip_paths[-1], boundary_path)
             print(f"Submitting {job_id}...", flush=True)
             task_id = submit(job, root, token)
             entry = {"id": job_id, "task_id": task_id, "status": "submitted", "output": None}

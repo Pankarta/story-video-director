@@ -4,7 +4,7 @@
 
 1. Execution boundary
 2. Credential safety
-3. First-frame design
+3. Input-mode selection
 4. API job preparation
 5. Running the renderer
 6. Multi-clip assembly
@@ -69,9 +69,13 @@ When the user selects a provider other than Metaso MiniMax-H3, ask them to paste
 
 Ask the user to replace real secrets with placeholders such as `YOUR_API_KEY` or `mk-xxxxx`. After an adapter is prepared and validated with a dry run, obtain the actual credential through an environment variable or secret manager. Preserve the same rules: explicit approval before paid jobs, no secrets in files or logs, sequential submission by default, and no undisclosed fallback clips.
 
-## 3. First-frame design
+## 3. Input-mode selection
 
-The current integration sends one image with `role: first_frame` for each clip. Therefore, make the first frame carry the visual information that matters most:
+MiniMax-H3 supports two mutually exclusive media modes. Choose exactly one mode for each clip.
+
+### Image-to-video mode
+
+Use one `first_frame` and optionally one `last_frame`. Do not include any `reference_image`, `reference_video`, or `reference_audio`. Make each frame carry the visual information that matters most:
 
 - exact recurring-character face, hair, costume, and body proportions;
 - location geometry, time, weather, light direction, and color palette;
@@ -81,13 +85,30 @@ The current integration sends one image with `role: first_frame` for each clip. 
 
 Generate a standalone cinematic frame. Do not use a four-view identity sheet, empty location, storyboard contact sheet, or collage as the API first frame.
 
-Repeat identity and continuity details inside the video prompt because supporting project images are not automatically sent to the provider.
+Repeat identity and continuity details inside the video prompt. Only media declared in `api-jobs.json` is sent.
 
-For clip continuity, design clip N's final frame and clip N+1's first frame as the same or closely matched composition. This does not guarantee perfect continuity, but it gives the model and editor a stable handoff.
+Choose the edit first using [continuity-and-edit-design.md](continuity-and-edit-design.md). Match end/start composition for same-view continuation; use motivated new coverage for viewpoint changes and fresh establishing information for a time/location jump.
+
+### Multimodal reference mode
+
+Use `reference_image`, `reference_video`, and/or `reference_audio`. Do not include `first_frame` or `last_frame` in the same request.
+
+- up to 9 reference images;
+- up to 3 reference videos, each 2–15 seconds, total video duration at most 15 seconds;
+- up to 3 reference audios, each 2–15 seconds, total audio duration at most 15 seconds;
+- prompt must reference media by upload order using `@1`, `@2`, and so on;
+- keep the `content` array order stable: text first, then media ordered by slot;
+- for a character ensemble, use one controlling composition image plus identity images when the budget allows;
+- a final nine-image ensemble job may use `@1` as the arena/composition reference and `@2`–`@9` as eight character identities.
+- for compatible same-view continuation, inspect and extract the preceding clip's usable retained end frame into a stable boundary file and upload it as `reference_image` slot 1; keep recurring identity anchors in the following stable slots. Direct the model to begin from the boundary composition while using the identity sheets only for face, body, hair, costume, and prop identity.
+
+Default to multimodal reference mode when two or more of these are important: recurring identity, ensemble identity, location continuity, prop continuity, action layout, style continuity, or a preceding real end frame. Single-frame image-to-video is the exception, not the default, for narrative work.
+
+Provider constraints: request body at most 64 MB; each reference image at most 30 MB, dimensions 256–5760 px, width/height ratio 0.4–2.5. Prefer public URLs for large media; local images are encoded as data URLs only when the complete request remains below 64 MB.
 
 ## 4. API job preparation
 
-Use a job shaped like:
+Image-to-video job:
 
 ```json
 {
@@ -109,7 +130,26 @@ Use a job shaped like:
 }
 ```
 
-Keep every duration as an integer from 1 through 15 seconds. Use only provider-supported resolution values. The renderer treats `aspect_ratio` as guidance; the provider may return `adaptive` and follow the first-frame geometry.
+Multimodal reference job:
+
+```json
+{
+  "id": "clip-02",
+  "model": "MiniMax-H3",
+  "duration_seconds": 12,
+  "aspect_ratio": "16:9",
+  "fps": 24,
+  "resolution": "2K",
+  "prompt_file": "prompts/clip-02.md",
+  "references": [
+    {"type": "image", "path": "assets/shots/clip-02-composition.png", "role": "reference_image", "slot": 1},
+    {"type": "image", "path": "assets/characters/lead.png", "role": "reference_image", "slot": 2},
+    {"type": "image", "path": "assets/characters/rival.png", "role": "reference_image", "slot": 3}
+  ]
+}
+```
+
+Keep every duration as an integer from 4 through 15 seconds. Use only provider-supported resolution values. For image-to-video the provider derives ratio from the first/last frame and treats it as adaptive. For multimodal reference mode, use `adaptive` or a supported explicit ratio such as `16:9`.
 
 Each prompt file must contain exactly one fenced prompt block. Put audiovisual direction inside that block: timed motion, camera, sound, dialogue, music, final state, and negative constraints.
 
@@ -138,6 +178,8 @@ The script submits jobs sequentially by default to reduce uncontrolled spending,
 Use `--no-assemble` to download individual clips only. Use `--poll-seconds` to change the polling interval. Do not decrease polling aggressively.
 
 ## 6. Multi-clip assembly
+
+This is baseline concatenation, not execution of an editorial timeline. For actual-frame review gates, J/L cuts, selected trims or a continuous master mix, follow [continuity-and-edit-design.md](continuity-and-edit-design.md) and use staged `--no-assemble` rendering plus explicit post-production.
 
 Before concatenation, normalize every clip to:
 

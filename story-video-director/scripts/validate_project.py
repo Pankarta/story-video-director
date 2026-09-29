@@ -44,6 +44,10 @@ def chinese_char_count(text: str) -> int:
     return len(re.findall(r"[\u3400-\u9fff]", text))
 
 
+def normalize_dialogue(text: str) -> str:
+    return re.sub(r"\s+", "", text).strip()
+
+
 def validate_project(root: Path) -> tuple[list[str], list[str], dict]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -58,6 +62,30 @@ def validate_project(root: Path) -> tuple[list[str], list[str], dict]:
     if not isinstance(clips, list) or not clips:
         errors.append("project-manifest.json must contain a non-empty clips array")
         clips = []
+
+    recurring = manifest.get("recurring_identities", [])
+    if recurring:
+        if not isinstance(recurring, list):
+            errors.append("recurring_identities must be an array")
+            recurring = []
+        for index, identity in enumerate(recurring, start=1):
+            label = f"recurring identity #{index}"
+            if not isinstance(identity, dict):
+                errors.append(f"{label} must be an object")
+                continue
+            identity_id = str(identity.get("id", "")).strip()
+            anchor = identity.get("identity_anchor")
+            consumers = identity.get("clips", [])
+            if not identity_id:
+                errors.append(f"{label} is missing id")
+            if not isinstance(anchor, str) or not anchor:
+                errors.append(f"{label}: missing identity_anchor")
+            elif not (root / anchor).is_file():
+                errors.append(f"{label}: identity anchor does not exist: {anchor}")
+            elif "/characters/" not in f"/{anchor}":
+                warnings.append(f"{label}: identity anchor should normally live under assets/characters/")
+            if not isinstance(consumers, list) or len(consumers) < 2:
+                errors.append(f"{label}: clips must contain at least two consuming clip ids")
 
     target_model = str(manifest.get("target_model", "seedance-2.0")).lower()
     limits = MODEL_LIMITS.get(target_model)
@@ -87,6 +115,8 @@ def validate_project(root: Path) -> tuple[list[str], list[str], dict]:
 
     total = 0.0
     clip_ids: list[str] = []
+    prompt_bodies: dict[str, str] = {}
+    clip_durations: dict[str, float] = {}
     for index, clip in enumerate(clips, start=1):
         label = f"clip #{index}"
         if not isinstance(clip, dict):
@@ -109,6 +139,7 @@ def validate_project(root: Path) -> tuple[list[str], list[str], dict]:
         elif duration > 15:
             errors.append(f"{label}: duration {duration}s exceeds 15s")
         total += float(duration)
+        clip_durations[clip_id] = float(duration)
 
         prompt_rel = clip.get("prompt_file")
         if not isinstance(prompt_rel, str) or not prompt_rel:
@@ -128,6 +159,7 @@ def validate_project(root: Path) -> tuple[list[str], list[str], dict]:
                 if len(blocks) != 1:
                     errors.append(f"{label}: prompt file must contain exactly one fenced prompt block")
                 prompt_body = blocks[0].strip() if blocks else prompt_text.strip()
+                prompt_bodies[clip_id] = prompt_body
                 if len(prompt_body) > 5000:
                     warnings.append(f"{label}: prompt is {len(prompt_body)} characters; prefer <=5000")
                 if not any(term in prompt_body for term in ("最终画面", "最后画面", "Last frame")):
@@ -136,6 +168,15 @@ def validate_project(root: Path) -> tuple[list[str], list[str], dict]:
                     errors.append(f"{label}: prompt lacks an audio policy")
                 if not any(term in prompt_body for term in ("负面提示词", "Negative Prompt")):
                     errors.append(f"{label}: prompt lacks a negative prompt")
+                if any(term in prompt_body for term in ("打斗", "追逐", "舞蹈", "多镜头", "连续镜头", "重力", "撞击", "战斗")):
+                    if not any(term in prompt_body for term in ("拍摄模式", "FORMAT MODE", "单一连续", "受控多镜头")):
+                        warnings.append(f"{label}: complex motion may need an explicit format mode and cut policy")
+                    if not any(term in prompt_body for term in ("物理", "PHYSICS", "惯性", "质量", "重力")):
+                        warnings.append(f"{label}: complex motion may need explicit physics and material response")
+                if "动态镜头" in prompt_body and not any(
+                    term in prompt_body for term in ("机位", "路径", "推进", "跟拍", "环绕", "手持", "轨道", "摇臂")
+                ):
+                    warnings.append(f"{label}: '动态镜头' lacks an executable camera path or rig behavior")
                 if not any(term in prompt_body for term in ("不要", "不得", "排除")):
                     warnings.append(f"{label}: no visible reference exclusion language found")
                 if re.search(r"\b(?:fps|seed|resolution)\b|\d+\s*:\s*\d+", prompt_body, re.I):
@@ -147,6 +188,18 @@ def validate_project(root: Path) -> tuple[list[str], list[str], dict]:
                     warnings.append(
                         f"{label}: {spoken_chars} Chinese dialogue characters may exceed natural timing for {duration}s"
                     )
+                dialogue_lines = [line.strip() for line in prompt_body.splitlines() if re.search(r"\{[^{}]+\}", line)]
+                for dialogue_line in dialogue_lines:
+                    canonical = re.search(
+                        r"\[[A-Za-z0-9_-]+\].*说话人：[^；;，,]+[；;，,].*受话人：[^；;，,]+[；;，,].*\{[^{}]+\}",
+                        dialogue_line,
+                    )
+                    if not canonical:
+                        errors.append(f"{label}: non-canonical or unattributed dialogue line: {dialogue_line[:100]}")
+                    elif not any(term in dialogue_line for term in ("嘴唇", "口型", "嘴部")):
+                        errors.append(f"{label}: dialogue line lacks explicit speaker mouth/lip-sync state")
+                    elif not any(term in dialogue_line for term in ("闭嘴", "不发声", "不说话", "离画", "画外无可见听者")):
+                        errors.append(f"{label}: dialogue line lacks explicit listener silence/off-screen state")
 
         ref_groups = {
             "images": clip.get("image_refs", []),
@@ -179,6 +232,125 @@ def validate_project(root: Path) -> tuple[list[str], list[str], dict]:
         if total_limit is not None and total_refs > total_limit:
             errors.append(f"{label}: {total_refs} total references exceeds {target_model} conservative limit {total_limit}")
 
+    has_spoken_dialogue = any(re.search(r"\{[^{}]+\}", body) for body in prompt_bodies.values())
+    ledger_path = root / "dialogue-ledger.json"
+    ledger = read_json(ledger_path, errors) if ledger_path.is_file() else {}
+    if has_spoken_dialogue and not ledger_path.is_file():
+        errors.append("dialogue-led clips require dialogue-ledger.json")
+    if has_spoken_dialogue and not (root / "00-screenplay.md").is_file():
+        errors.append("dialogue-led clips require 00-screenplay.md")
+
+    if ledger:
+        ledger_characters = ledger.get("characters", [])
+        if not isinstance(ledger_characters, list) or not ledger_characters:
+            errors.append("dialogue-ledger.json must contain a non-empty characters array")
+            ledger_characters = []
+        character_ids: set[str] = set()
+        character_names: dict[str, str] = {}
+        for index, character in enumerate(ledger_characters, start=1):
+            label = f"dialogue character #{index}"
+            if not isinstance(character, dict):
+                errors.append(f"{label} must be an object")
+                continue
+            character_id = str(character.get("id", "")).strip()
+            character_name = str(character.get("name", "")).strip()
+            if not character_id or not character_name:
+                errors.append(f"{label} requires id and name")
+                continue
+            if character_id in character_ids:
+                errors.append(f"duplicate dialogue character id: {character_id}")
+            character_ids.add(character_id)
+            character_names[character_id] = character_name
+
+        ledger_clips = ledger.get("clips", [])
+        if not isinstance(ledger_clips, list):
+            errors.append("dialogue-ledger.json clips must be an array")
+            ledger_clips = []
+        ledger_clip_ids: set[str] = set()
+        utterance_ids: set[str] = set()
+        for index, ledger_clip in enumerate(ledger_clips, start=1):
+            if not isinstance(ledger_clip, dict):
+                errors.append(f"dialogue ledger clip #{index} must be an object")
+                continue
+            clip_id = str(ledger_clip.get("id", "")).strip()
+            if clip_id not in clip_ids:
+                errors.append(f"dialogue ledger references unknown clip: {clip_id or index}")
+                continue
+            if clip_id in ledger_clip_ids:
+                errors.append(f"duplicate dialogue ledger clip: {clip_id}")
+            ledger_clip_ids.add(clip_id)
+            utterances = ledger_clip.get("utterances", [])
+            if not isinstance(utterances, list):
+                errors.append(f"{clip_id}: utterances must be an array")
+                continue
+            prompt_body = prompt_bodies.get(clip_id, "")
+            prompt_lines = prompt_body.splitlines()
+            ranges: list[tuple[float, float, str]] = []
+            expected_texts: list[str] = []
+            for utterance_index, utterance in enumerate(utterances, start=1):
+                label = f"{clip_id} utterance #{utterance_index}"
+                if not isinstance(utterance, dict):
+                    errors.append(f"{label} must be an object")
+                    continue
+                utterance_id = str(utterance.get("id", "")).strip()
+                speaker_id = str(utterance.get("speaker_id", "")).strip()
+                speaker_name = str(utterance.get("speaker_name", "")).strip()
+                addressee = str(utterance.get("addressee", "")).strip()
+                utterance_text = str(utterance.get("text", "")).strip()
+                start = utterance.get("start_seconds")
+                end = utterance.get("end_seconds")
+                if not utterance_id:
+                    errors.append(f"{label}: missing id")
+                elif utterance_id in utterance_ids:
+                    errors.append(f"duplicate utterance id: {utterance_id}")
+                utterance_ids.add(utterance_id)
+                if speaker_id not in character_ids:
+                    errors.append(f"{label}: unknown speaker_id '{speaker_id}'")
+                elif character_names.get(speaker_id) != speaker_name:
+                    errors.append(f"{label}: speaker_name does not match character '{speaker_id}'")
+                if not addressee:
+                    errors.append(f"{label}: missing addressee")
+                if not utterance_text or "{" in utterance_text or "}" in utterance_text:
+                    errors.append(f"{label}: text must contain spoken words only, without braces")
+                if not isinstance(start, (int, float)) or not isinstance(end, (int, float)) or start >= end:
+                    errors.append(f"{label}: invalid start_seconds/end_seconds")
+                elif end > clip_durations.get(clip_id, 0):
+                    errors.append(f"{label}: utterance ends after clip duration")
+                else:
+                    ranges.append((float(start), float(end), utterance_id))
+                if utterance_text:
+                    expected_texts.append(normalize_dialogue(utterance_text))
+                matching_lines = [
+                    line for line in prompt_lines
+                    if f"[{utterance_id}]" in line and f"说话人：{speaker_name}" in line
+                ]
+                if len(matching_lines) != 1:
+                    errors.append(f"{label}: prompt must contain exactly one canonical speaker line")
+                elif f"{{{utterance_text}}}" not in matching_lines[0]:
+                    errors.append(f"{label}: prompt dialogue does not exactly match ledger text")
+                elif "受话人：" not in matching_lines[0]:
+                    errors.append(f"{label}: canonical prompt line lacks addressee")
+
+            ranges.sort()
+            for previous, current in zip(ranges, ranges[1:]):
+                if current[0] < previous[1]:
+                    errors.append(f"{clip_id}: utterances {previous[2]} and {current[2]} overlap")
+
+            actual_texts = [normalize_dialogue(value) for value in re.findall(r"\{([^{}]+)\}", prompt_body)]
+            if actual_texts != expected_texts:
+                errors.append(f"{clip_id}: prompt brace dialogue must match ledger once and in order")
+            final_match = re.search(
+                r"(?:最终画面|最后画面|Last frame)(.*?)(?:\n\s*(?:正向锁定|负面提示词|Positive|Negative)|\Z)",
+                prompt_body,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+            if final_match and re.search(r"\{[^{}]+\}", final_match.group(1)):
+                errors.append(f"{clip_id}: final-frame section must not repeat dialogue braces")
+
+        for clip_id, body in prompt_bodies.items():
+            if re.search(r"\{[^{}]+\}", body) and clip_id not in ledger_clip_ids:
+                errors.append(f"{clip_id}: spoken dialogue is missing from dialogue-ledger.json")
+
     declared_total = manifest.get("total_duration_seconds")
     if isinstance(declared_total, (int, float)):
         if abs(float(declared_total) - total) > 0.001:
@@ -200,17 +372,37 @@ def validate_project(root: Path) -> tuple[list[str], list[str], dict]:
                 continue
             label = str(job.get("id") or f"job #{index}")
             refs = job.get("references", [])
-            first_frames = [
-                ref for ref in refs
-                if isinstance(ref, dict) and ref.get("type") == "image" and ref.get("role") == "first_frame"
-            ] if isinstance(refs, list) else []
-            if len(first_frames) != 1:
-                errors.append(f"{label}: MiniMax-H3 job requires exactly one image reference with role first_frame")
-            elif not isinstance(first_frames[0].get("path"), str) or not (root / first_frames[0]["path"]).is_file():
-                errors.append(f"{label}: first_frame path does not exist")
+            refs = refs if isinstance(refs, list) else []
+            roles = [str(ref.get("role", "")) for ref in refs if isinstance(ref, dict)]
+            frame_mode = any(role in {"first_frame", "last_frame"} for role in roles)
+            reference_mode = any(role in {"reference_image", "reference_video", "reference_audio"} for role in roles)
+            if not refs:
+                errors.append(f"{label}: MiniMax-H3 job requires at least one media reference")
+            if frame_mode and reference_mode:
+                errors.append(f"{label}: frame roles and multimodal reference roles are mutually exclusive")
+            if frame_mode:
+                if roles.count("first_frame") > 1 or roles.count("last_frame") > 1:
+                    errors.append(f"{label}: at most one first_frame and one last_frame are allowed")
+                if any(role not in {"first_frame", "last_frame"} for role in roles):
+                    errors.append(f"{label}: invalid role in image-to-video mode")
+            if reference_mode:
+                if roles.count("reference_image") > 9:
+                    errors.append(f"{label}: reference_image count exceeds 9")
+                if roles.count("reference_video") > 3 or roles.count("reference_audio") > 3:
+                    errors.append(f"{label}: reference video/audio count exceeds 3")
+                if any(role not in {"reference_image", "reference_video", "reference_audio"} for role in roles):
+                    errors.append(f"{label}: invalid role in multimodal reference mode")
+                if len(clips) > 1 and roles.count("reference_image") < 2:
+                    warnings.append(f"{label}: narrative multimodal job uses fewer than two reference images")
+            slots = [ref.get("slot") for ref in refs if isinstance(ref, dict)]
+            if slots != list(range(1, len(refs) + 1)):
+                errors.append(f"{label}: reference slots must be contiguous and ordered from 1")
+            for ref in refs:
+                if not isinstance(ref, dict) or not isinstance(ref.get("path"), str) or not (root / ref["path"]).is_file():
+                    errors.append(f"{label}: reference path does not exist")
             duration = job.get("duration_seconds")
-            if not isinstance(duration, int) or isinstance(duration, bool) or not 1 <= duration <= 15:
-                errors.append(f"{label}: MiniMax-H3 duration_seconds must be an integer in [1, 15]")
+            if not isinstance(duration, int) or isinstance(duration, bool) or not 4 <= duration <= 15:
+                errors.append(f"{label}: MiniMax-H3 duration_seconds must be an integer in [4, 15]")
 
     summary.update({"clips": len(clips), "duration": total, "model": target_model})
     return errors, warnings, summary
